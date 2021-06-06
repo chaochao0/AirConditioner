@@ -15,7 +15,8 @@
 ![image-20210606205053700](C:\Users\王梦超\AppData\Roaming\Typora\typora-user-images\image-20210606205053700.png)
 
 * 打开cmd ，cd 到有manage.py这个文件的目录下
-* 执行  python manage.py makemigtations
+* 执行  python manage.py makemigrations
+* 报错，有两个库没装，按提示装库
 * 执行 python manage.py  migrate   迁移数据库
 * 执行 python manage.py createsuperuser,  输入用户名密码，然后就可以在django自带的管理页面（127.0.0.1/8000/admin）上管理数据库
 * 执行  python manage.py runserver 运行后端服务器
