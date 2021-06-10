@@ -1,5 +1,5 @@
 from django.db import models
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count, Max
 import json
 import datetime
 from time import sleep
@@ -77,8 +77,8 @@ class ServiceRecord(models.Model):
     target_temp = models.IntegerField('目标温度')
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
-    
-    #自动获取以下字段
+
+    # 自动获取以下字段
     service_time = models.DurationField(default=timedelta())
     power_comsumption = models.FloatField('用电度数', default=0.0)
     #now_temp = models.FloatField('当前温度')
@@ -156,7 +156,7 @@ class RoomDailyReport(models.Model):
     #temp_often_use = models.IntegerField('使用时间最长的目标温度', default=0)
     # 这个域好像我实现不了，目前想法是在每次获得日报表时，都查询那一天的服务记录，统计出那一天的使用时间最长的目标温度。
     # 或者，实现个定时器，每次到24点自动执行，获得使用时间最长的目标温度
-
+    switch_num = models.IntegerField('开关次数', default=0)  # 开关次数
     upto_target_count = models.IntegerField('达到目标温度次数', default=0)  # 达到目标温度次数
     schedule_count = models.IntegerField('被调度次数', default=0)
     # change_temp_count = models.IntegerField('调温次数', default=0)
@@ -191,6 +191,7 @@ class ServiceQueue(models.Model):
 
     class Meta:
         ordering = ['-blow_mode', 'service_timestamp']
+
 
 def auto_create_service_record(sender, instance, *args, **kwargs):
     new_serviceRecord = (ServiceRecord(room_id=instance.room_id, tenant=Tenant.objects.filter(
@@ -349,7 +350,7 @@ class Manager(User):
 
     def getReporter(self, date_begin, date_end):
         reporter = RoomDailyReport.objects.filter(date__range=(date_begin, date_end)).values(
-            'room_id').annotate(Sum('blow_l_time'), Sum('blow_m_time'), Sum('blow_h_time'), Sum('service_num'), Sum('service_time'), Sum('fee')).values('room_id', 'blow_l_time__sum', 'blow_m_time__sum', 'blow_h_time__sum', 'service_num__sum', 'service_time__sum', 'fee__sum')
+            'room_id').annotate(Sum('blow_l_time'), Sum('blow_m_time'), Sum('blow_h_time'), Sum('service_num'), Sum('service_time'), Sum('fee'), Sum('switch_num'), Sum('upto_target_count'), Sum('schedule_count')).order_by('room_id').values('room_id', 'blow_l_time__sum', 'blow_m_time__sum', 'blow_h_time__sum', 'service_num__sum', 'service_time__sum', 'fee__sum', 'switch_num__sum', 'upto_target_count__sum', 'schedule_count__sum')
 
         for i in reporter:
             i["blow_l_time__sum"] = round(
@@ -365,8 +366,29 @@ class Manager(User):
         #     'room_id', 'blow_l_time__sum', 'blow_m_time__sum', 'blow_h_time__sum', 'service_num__sum', 'service_time__sum'))
         # Django的serializers无法处理ValuesQuerySet。但是，您可以使用标准json.dumps()进行序列化，
         # 并使用list()将ValuesQuerySet转换为列表。如果您的集合包含Django字段(如Decimals)，则需要传入DjangoJSONEncoder
+        room_temp_usetime = ServiceRecord.objects.filter(start_time__date__range=(date_begin, date_end)).values(
+            'room_id', 'target_temp').annotate(Sum('service_time')).order_by('room_id', '-service_time__sum').values('room_id', 'target_temp', 'service_time__sum')  # .annotate(Max('service_time__sum')).values('room_id','target_temp')#aggregate(Max('service_time__sum')) #values('room_id','target_temp','service_time__sum')
+        room_temp_often_use = []
+        last_room_id = room_temp_usetime[0]['room_id']
+        room_temp_often_use.append(
+            {'room_id': last_room_id, 'temp_often_use': room_temp_usetime[0]['target_temp']})
+        for i in room_temp_usetime:
+            if i['room_id'] == last_room_id:
+                continue
+            last_room_id = i['room_id']
+            room_temp_often_use.append(
+                {'room_id': last_room_id, 'temp_often_use': i['target_temp']})
+
         from django.core.serializers.json import DjangoJSONEncoder
         reporter = json.dumps(list(reporter), cls=DjangoJSONEncoder)
+        # room_temp_often_use = json.dump(
+        #     list(room_temp_often_use), cls=DjangoJSONEncoder)
+
+        reporter = json.loads(reporter)
+        # room_temp_often_use=json.loads(room_temp_often_use)
+        for i in range(len(reporter)):
+            reporter[i]['temp_often_use'] = room_temp_often_use[i]['temp_often_use']
+        reporter = json.dumps(reporter)
         print(reporter)
         print(type(reporter))
         return reporter
@@ -444,7 +466,7 @@ class AC(models.Model):
         req = RequestQueue.objects.all().order_by(
             '-blow_mode', 'request_timestamp')  # 按照风速降序，请求时间增序排序
         seq = ServiceQueue.objects.all().order_by('-blow_mode', 'service_timestamp')
-        print(f"req:{req.count()} seq:{seq.count()} ")
+        #print(f"req:{req.count()} seq:{seq.count()} ")
         # 更新房间温度和计费
         rooms = Room.objects.all()
         for room in rooms:
@@ -506,7 +528,7 @@ class AC(models.Model):
 
                 req_in.append(req[i])
                 new_seq = ServiceQueue(
-                    room_id=req[i].room_id, room_state=1, temp_mode=self.temp_mode, blow_mode=req[i].blow_mode, target_temp=req[i].target_temp,service_timestamp=timezone.now())
+                    room_id=req[i].room_id, room_state=1, temp_mode=self.temp_mode, blow_mode=req[i].blow_mode, target_temp=req[i].target_temp, service_timestamp=timezone.now())
                 new_seq.save()
 
             for i in req_in:
@@ -596,6 +618,7 @@ class AC(models.Model):
                     seq_out[i].delete()
 
             # save队列，并更新room状态、dailyRoomReport
+            print(len(new_seq))
             for i in range(len(new_seq)):
                 new_seq[i].save()
                 new_req[i].save()
